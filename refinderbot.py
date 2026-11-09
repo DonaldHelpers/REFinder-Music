@@ -12,13 +12,12 @@ from telebot import types
 
 ####НАСТРОЙКИ БОТА
 ADMIN_USER_ID = os.environ.get('ADMIN_USER_ID', '123456789')  #ID администратора для рассылки сообщений (из переменной окружения)
-DATABASE_FILE = os.environ.get('DATABASE_FILE', 'telemusic.db')  #путь к файлу базы данных
-CACHE_DB_FILE = os.environ.get('CACHE_DB_FILE', 'telegram_bot_cache.json')  #путь к файлу кэша
-DOWNLOAD_DIR = os.environ.get("DOWNLOAD_DIR", "/data/downloads/")  #папка для загруженных файлов
+DATABASE_FILE = os.environ.get('DATABASE_FILE', '/tmp/telemusic.db')  #путь к файлу базы данных
+CACHE_DB_FILE = os.environ.get('CACHE_DB_FILE', '/tmp/telegram_bot_cache.json')  #путь к файлу кэша
+DOWNLOAD_DIR = os.environ.get("DOWNLOAD_DIR", "/tmp/downloads/")  #папка для загруженных файлов
 CACHE_LIFETIME = 60*60*24*30*6  #время жизни кэша результатов поиска (в секундах, здесь 6 месяцев)
 FILE_ROTATE = 50  #максимальное количество хранимых аудиофайлов
 MAX_LONG = 720  #максимальная длительность загрузки музыки в секундах (12 минут)(при прямой ссылке)
-RESULTS_PAGES = 5  #количество результатов, отображаемых на странице.
 MAX_TITLE_LENGTH = 40  #максимально допустимая длина заголовка перед усечением или сжатием
 DROP_VOWELS = 50  #процент гласных, которые нужно сжать в заголовке.
 MAX_RESULTS = 15  #количество возвращаемых результатов поиска («ytsearch10» возвращает первые 10)..
@@ -32,9 +31,8 @@ if os.environ.get('YOUTUBE_COOKIES'):
         _f.write(os.environ['YOUTUBE_COOKIES'].replace('\\n', '\n'))
 YDL_COOKIES = {'cookiefile': COOKIES_FILE} if os.path.exists(COOKIES_FILE) else {}
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
-bot = telebot.TeleBot(BOT_TOKEN)
+bot = telebot.TeleBot(BOT_TOKEN, threaded=False)  # webhook на Vercel: обрабатываем update синхронно
 logging.basicConfig(format='%(asctime)s %(levelname)s %(message)s', level=logging.DEBUG)
-requests = {}
 cached_search_results = {}
 downloaded_files_cache = {}
 
@@ -269,50 +267,43 @@ def search_music(username, keywords, search_amount=MAX_RESULTS):
             logging.info('Нашли музыку по запросу: ' + info['entries'][0]['webpage_url'])
             filtered_entries = [
         {
-            'title': e['title'],
-            'webpage_url': e['webpage_url'],
-            'duration': e['duration']
-            # Отсюда можно добавить любые другие данные, которые считаешь необходимыми
+            'id': e.get('id'),
+            'title': e.get('title', 'Unknown Title'),
+            'webpage_url': e.get('webpage_url'),
+            'duration': e.get('duration', 0),
         }
         for e in info['entries'] if e.get('duration', 0) <= 900
     ]
     cache_search_results(keywords, filtered_entries)
     return filtered_entries
     
-#загрузка и конвертация трека
+#загрузка трека (без ffmpeg: берём готовый m4a/mp3 от YouTube)
 def download_and_convert_music(user_id, url):
     logging.info(f'def download_and_convert_music {url}')
+    os.makedirs(DOWNLOAD_DIR, exist_ok=True)
     rotate_files(DOWNLOAD_DIR)
-    cached_file_path, cached_url = get_cached_file_path(url) 
-    if cached_file_path:
-      url = cached_url or url  # Используем URL из кэша, если он есть
-      return cached_file_path
+    cached_file_path, cached_url = get_cached_file_path(url)
+    if cached_file_path and os.path.exists(cached_file_path):
+        return cached_file_path
     ydl_opts = {
-        'format': 'bestaudio/best',
+        'format': 'bestaudio[ext=m4a]/bestaudio[ext=mp3]/bestaudio',
         **YDL_COOKIES,
-        'postprocessors': [{
-        'key': 'FFmpegExtractAudio',
-        'preferredcodec': 'mp3',
-        'preferredquality': '256',
-         }],
-         'quiet': True,
-         'outtmpl': '%(id)s.%(ext)s',  # Шаблон временного имени файла
-      }
+        'quiet': True,
+        'outtmpl': os.path.join(DOWNLOAD_DIR, '%(id)s.%(ext)s'),
+    }
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         info = ydl.extract_info(url, download=True)
         logging.info(f'Музыка скачана по URL: {url}')
-        temp_file_path = ydl.prepare_filename(info) # Вытаскиваем заголовок и исполнителя для формирования итогового имени файла
+        temp_file_path = ydl.prepare_filename(info)
+        ext = os.path.splitext(temp_file_path)[1]
         title = safe_filename(info.get('title', 'Unknown Title'))
-        safe_mp3_filename = f'{title}.mp3'
-        temp_file_path = temp_file_path.removesuffix('.webm').removesuffix('.m4a').removesuffix('.mp4') + '.mp3' # расширение файла на основе postprocessor, уже должно быть mp3
-        new_file_path = os.path.join(os.path.dirname(temp_file_path), safe_mp3_filename) # Полный путь к файлу, куда будет переименован файл
-        if os.path.exists(temp_file_path):  # Проверка, существует ли скачанный файл по временному пути
-            os.rename(temp_file_path, new_file_path)  # Переименование оригинального файла в новое имя файла
-            cache_file_path(url, new_file_path, url)
-            logging.info(f'Файл успешно сохранен как {new_file_path}')
-        else:
+        new_file_path = os.path.join(DOWNLOAD_DIR, f'{title}{ext}')
+        if not os.path.exists(temp_file_path):
             logging.error(f'Скачанный файл {temp_file_path} не найден.')
             return None
+        os.replace(temp_file_path, new_file_path)
+        cache_file_path(url, new_file_path, url)
+        logging.info(f'Файл успешно сохранен как {new_file_path}')
         return new_file_path
 
 
@@ -396,61 +387,44 @@ def text(message):
         # Обрабатываем остальной текст как поиск
         results = search_music(username, keywords)
         if results:
-            requests[chat_id] = results
-            send_results_page(chat_id, results)  # Отправляем первую страницу результатов
+            send_results(chat_id, results)
         else:
             bot.send_message(chat_id, "К сожалению, ничего не найдено. Попробуйте другой запрос.")  
     
-#отправка сообщений с результатами поиска
-def send_results_page(chat_id, results, page=1, results_per_page=RESULTS_PAGES):
-    total_pages = (len(results) + results_per_page - 1) // results_per_page
-    page = max(1, min(page, total_pages))
-    page_results = results[(page - 1) * results_per_page: page * results_per_page]
+#отправка результатов поиска (все результаты одним сообщением; id видео кладём в callback_data)
+def send_results(chat_id, results):
     keyboard = types.InlineKeyboardMarkup(row_width=1)
-    #кнопки для каждой песни
-    for i, item in enumerate(page_results, start=(page - 1) * results_per_page):
-        duration = format_duration(item['duration']) if 'duration' in item else 'Unknown'
+    for i, item in enumerate(results):
+        if not item.get('id'):
+            continue
+        duration = format_duration(item['duration']) if item.get('duration') else 'Unknown'
         title = trim_or_compress_title(item.get('title', 'Unknown Title'))
         button_text = f"{i + 1}. {title} [{duration}]"
-        keyboard.add(types.InlineKeyboardButton(button_text, callback_data=f'download_{i + 1}')) 
-    #кнопки для навигации по страницам
-    navigation_buttons = []
-    if page > 1:
-        navigation_buttons.append(types.InlineKeyboardButton("<<", callback_data=f'page_{page-1}'))
-    if page < total_pages:
-        navigation_buttons.append(types.InlineKeyboardButton(">>", callback_data=f'page_{page+1}'))
-    if navigation_buttons:
-        keyboard.row(*navigation_buttons)
+        keyboard.add(types.InlineKeyboardButton(button_text, callback_data=f"dl:{item['id']}"))
     bot.send_message(chat_id, "Выберите трек для скачивания:", reply_markup=keyboard)
-    
-#страницы
-@bot.callback_query_handler(func=lambda call: call.data.startswith('page_'))
-def query_page(call):
-    # Обработчик запросов на переключение страниц с результатами поиска
-    page_num = int(call.data.split('_')[1])
-    chat_id = call.message.chat.id
-    send_results_page(chat_id, requests[chat_id], page=page_num)
 
-#загрузка
-@bot.callback_query_handler(func=lambda call: call.data.startswith('download_'))
+#загрузка по нажатию кнопки
+@bot.callback_query_handler(func=lambda call: call.data.startswith('dl:'))
 def callback_query(call):
-    user_id = call.from_user.id  # Получаем user_id из объекта call
+    user_id = call.from_user.id
     chat_id = call.message.chat.id
     username = call.from_user.username
-    index = int(call.data.split('_')[1]) - 1  # Получаем индекс трека
-    url = requests[chat_id][index]['webpage_url']  # Получаем URL для скачивания
-    file_path = download_and_convert_music(user_id, url)  # Скачиваем и конвертируем файл 
-    db_add_download(user_id, username, url, file_path)
-    if file_path:  # Если файл успешно скачан
-        send_music(chat_id, file_path)  # Отправляем музыку пользователю
-    else:  # Если возникла ошибка при скачивании
-        bot.send_message(chat_id, "Не удалось скачать трек.")  # Отправляем сообщение об ошибке
-        
+    url = f"https://www.youtube.com/watch?v={call.data[3:]}"
+    bot.answer_callback_query(call.id)
+    file_path = download_and_convert_music(user_id, url)
+    if file_path:
+        db_add_download(user_id, username, url, file_path)
+        send_music(chat_id, file_path)
+    else:
+        bot.send_message(chat_id, "Не удалось скачать трек.")
+
 def send_music(chat_id, filename):
     logging.info(f'Начинаем отправку музыки в чат {chat_id} по имени файла: {filename}')
     with open(filename, 'rb') as audio:
-        bot.send_audio(chat_id, audio)
+        if filename.lower().endswith(('.mp3', '.m4a')):
+            bot.send_audio(chat_id, audio)
+        else:
+            bot.send_document(chat_id, audio)
     logging.info(f'Отправили музыку в чат {chat_id} по имени файла: {filename}')
 
-# Запуск polling для обработки сообщений от пользователей
-bot.polling(none_stop=True, timeout=30)
+# Запуск (polling) выполняется через webhook: см. api/index.py

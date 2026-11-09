@@ -11,10 +11,10 @@ from telebot import types
 
 
 ####НАСТРОЙКИ БОТА
-ADMIN_USER_ID = '123456789'  #ID администратора для рассылки сообщений
-DATABASE_FILE = 'telemusic.db'  #путь к файлу базы данных
-CACHE_DB_FILE = 'telegram_bot_cache.json'  #путь к файлу кэша
-DOWNLOAD_DIR = "/path/to/dir/"  #папка для загруженных файлов
+ADMIN_USER_ID = os.environ.get('ADMIN_USER_ID', '123456789')  #ID администратора для рассылки сообщений (из переменной окружения)
+DATABASE_FILE = os.environ.get('DATABASE_FILE', 'telemusic.db')  #путь к файлу базы данных
+CACHE_DB_FILE = os.environ.get('CACHE_DB_FILE', 'telegram_bot_cache.json')  #путь к файлу кэша
+DOWNLOAD_DIR = os.environ.get("DOWNLOAD_DIR", "/data/downloads/")  #папка для загруженных файлов
 CACHE_LIFETIME = 60*60*24*30*6  #время жизни кэша результатов поиска (в секундах, здесь 6 месяцев)
 FILE_ROTATE = 50  #максимальное количество хранимых аудиофайлов
 MAX_LONG = 720  #максимальная длительность загрузки музыки в секундах (12 минут)(при прямой ссылке)
@@ -24,7 +24,15 @@ DROP_VOWELS = 50  #процент гласных, которые нужно сж
 MAX_RESULTS = 15  #количество возвращаемых результатов поиска («ytsearch10» возвращает первые 10)..
 MAX_DURATION = 900  #максимальная продолжительность видео в секундах (15 минут)(при поиске)
 
-bot = telebot.TeleBot('KEY')# Токен Telegram бота
+BOT_TOKEN = os.environ['BOT_TOKEN']  # Токен Telegram бота (переменная окружения)
+# Куки YouTube (в формате Netscape) передаются целиком в переменной YOUTUBE_COOKIES
+COOKIES_FILE = os.environ.get('COOKIES_FILE', '/tmp/youtube_cookies.txt')
+if os.environ.get('YOUTUBE_COOKIES'):
+    with open(COOKIES_FILE, 'w', encoding='utf-8') as _f:
+        _f.write(os.environ['YOUTUBE_COOKIES'].replace('\\n', '\n'))
+YDL_COOKIES = {'cookiefile': COOKIES_FILE} if os.path.exists(COOKIES_FILE) else {}
+os.makedirs(DOWNLOAD_DIR, exist_ok=True)
+bot = telebot.TeleBot(BOT_TOKEN)
 logging.basicConfig(format='%(asctime)s %(levelname)s %(message)s', level=logging.DEBUG)
 requests = {}
 cached_search_results = {}
@@ -249,7 +257,8 @@ def search_music(username, keywords, search_amount=MAX_RESULTS):
     ydl_opts = {
         'default_search': f'ytsearch{search_amount}',
         'noplaylist': True,
-        'quiet': True
+        'quiet': True,
+        **YDL_COOKIES
         }
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         info = ydl.extract_info(keywords, download=False)
@@ -280,6 +289,7 @@ def download_and_convert_music(user_id, url):
       return cached_file_path
     ydl_opts = {
         'format': 'bestaudio/best',
+        **YDL_COOKIES,
         'postprocessors': [{
         'key': 'FFmpegExtractAudio',
         'preferredcodec': 'mp3',
@@ -360,6 +370,7 @@ def text(message):
         ydl_opts = {
             'format': 'bestaudio/best',
             'quiet': True,
+            **YDL_COOKIES,
         }
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             try:
